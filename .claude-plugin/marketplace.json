@@ -1,0 +1,15 @@
+{
+  "name": "make-design-system",
+  "description": "Reference URL to design candidates to design system",
+  "owner": {
+    "name": "zkfmapf123",
+    "email": "zkfmapf123@naver.com"
+  },
+  "plugins": [
+    {
+      "name": "make-design-system",
+      "source": "./",
+      "description": "Benchmark a reference URL, build 5 structurally original design candidates as HTML, then turn the chosen one into a full design system"
+    }
+  ]
+}
