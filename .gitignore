@@ -3,3 +3,4 @@ node_modules/
 skills/make-design-system/scripts/.cache/
 skills/make-design-system/scripts/package-lock.json
 .benchmark/
+.claude/reports/

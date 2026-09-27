@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // make-design-system CLI
 //   capture <url>        --out <dir>                     reference analysis (styles, vars, fonts, sections, requests, public css/js)
-//   shots   <url|file>   --out <dir> [--step 700] [--menu <selector>] [--wait 1500]
+//   shots   <url|file>   --out <dir> [--step 700] [--menu <selector>] [--wait 1500] [--keep-overlays]
 //   verify  <url|file>   [--out <dir>]                   console errors + horizontal overflow, exit 1 on failure
 //   grid    <dir>        [--cols 2] [--scale 0.5] [--prefix d] [--per 4]
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const [, , cmd, target, ...rest] = process.argv;
 const opts = {};
@@ -17,11 +17,57 @@ const toUrl = t => /^https?:|^file:/.test(t) ? t : pathToFileURL(path.resolve(t)
 const outDir = d => { fs.mkdirSync(d, { recursive: true }); return d; };
 const MENU_GUESS = 'button[aria-label*="menu" i], [class*="hamburger" i], [class*="menuIco" i], [class*="menu-btn" i], [class*="menuBtn" i], [class*="menu-toggle" i], [aria-controls*="menu" i]';
 
+// Puppeteer resolves .puppeteerrc.cjs from the CURRENT WORKING DIRECTORY, not from this
+// script. Run from a user's project and it silently falls back to ~/.cache/puppeteer and then
+// throws "Could not find chrome-headless-shell". Pin the cache to this folder before the import.
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+process.env.PUPPETEER_CACHE_DIR ||= path.join(SCRIPT_DIR, '.cache', 'puppeteer');
+
 async function launch() {
   const puppeteer = await import('puppeteer');
-  const browser = await puppeteer.default.launch({ headless: 'shell' });
+  // headless: 'shell' — setup.sh downloads chrome-headless-shell only, not full Chrome.
+  // Any custom script reusing these node_modules must pass the same flag.
+  let browser;
+  try {
+    browser = await puppeteer.default.launch({ headless: 'shell' });
+  } catch (e) {
+    console.error(
+      `\nCould not launch the bundled browser (cache: ${process.env.PUPPETEER_CACHE_DIR}).\n` +
+      `Run:  bash ${path.join(SCRIPT_DIR, 'setup.sh')}\n`);
+    throw e;
+  }
   return { puppeteer, browser };
 }
+
+// Consent banners, cookie walls and regional-notice modals cover every screenshot, and the
+// reference analysis is then worthless. Click the usual accept/continue control, then remove
+// whatever fixed element still covers a large share of the viewport.
+// Measured on a real run: a regulatory modal hid all 18 shots of the reference site.
+const dismissOverlays = page => page.evaluate(() => {
+  const RE = /^(continue|accept|accept all|agree|i agree|ok|okay|got it|i understand|allow all|close)$/i;
+  const all = [];
+  const walk = root => {
+    for (const el of root.querySelectorAll('*')) { all.push(el); if (el.shadowRoot) walk(el.shadowRoot); }
+  };
+  walk(document);
+  const hit = all.find(el => RE.test((el.textContent || '').trim()) && el.offsetParent !== null
+    && ['BUTTON', 'A', 'DIV', 'SPAN'].includes(el.tagName));
+  let clicked = null;
+  if (hit) { hit.click(); clicked = (hit.textContent || '').trim(); }
+  let stripped = 0;
+  const vw = innerWidth, vh = innerHeight;
+  for (const el of document.querySelectorAll('body *')) {
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'fixed') continue;
+    const r = el.getBoundingClientRect();
+    const covers = r.width * r.height > vw * vh * 0.35;
+    const dims = cs.backgroundColor.includes('rgba') || Number(cs.zIndex) > 900;
+    if (covers && dims) { el.remove(); stripped++; }
+  }
+  document.body.style.overflow = '';
+  document.documentElement.style.overflow = '';
+  return { clicked, stripped };
+});
 
 async function open(browser, puppeteer, url, device) {
   const page = await browser.newPage();
@@ -33,7 +79,10 @@ async function open(browser, puppeteer, url, device) {
   page.on('requestfailed', r => log.failed.push(`${r.failure()?.errorText} ${r.url()}`));
   await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
   await wait(Number(opts.wait ?? 1500));
-  return { page, log };
+  // Late-injected modals appear after load, so dismiss AFTER the settle wait.
+  let overlays = { clicked: null, stripped: 0 };
+  if (!opts['keep-overlays']) { overlays = await dismissOverlays(page); await wait(600); }
+  return { page, log, overlays };
 }
 
 // Scroll through once so lazy content and scroll-triggered animations settle.
@@ -121,7 +170,7 @@ async function shots() {
   const { puppeteer, browser } = await launch();
   const result = {};
   for (const [prefix, device] of [['d', 'desktop'], ['m', 'mobile']]) {
-    const { page, log } = await open(browser, puppeteer, url, device);
+    const { page, log, overlays } = await open(browser, puppeteer, url, device);
     const H = await page.evaluate(() => document.documentElement.scrollHeight);
     let i = 0;
     for (let y = 0; y < H; y += step) {
@@ -137,7 +186,7 @@ async function shots() {
       await btn.click().catch(() => {}); await wait(1500);
       await page.screenshot({ path: path.join(out, `${prefix}_menu.png`) }); menu = true;
     }
-    result[device] = { height: H, shots: i, menu, errors: log.console.length + log.pageerror.length };
+    result[device] = { height: H, shots: i, menu, overlays, errors: log.console.length + log.pageerror.length };
     await page.close();
   }
   await browser.close();
