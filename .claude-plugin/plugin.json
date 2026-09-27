@@ -1,7 +1,7 @@
 {
   "name": "make-design-system",
   "description": "Benchmark a reference URL, build 5 structurally original design candidates as HTML, then turn the chosen one into a full design system",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "zkfmapf123",
     "email": "zkfmapf123@naver.com"
